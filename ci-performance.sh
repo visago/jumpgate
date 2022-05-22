@@ -5,8 +5,15 @@ TESTLOGFILE="test.log"
 METRICSLISTEN="127.0.0.1:9878"
 JUMPGATELISTEN="0.0.0.0:5002" 
 JUMPGATETARGET="127.0.0.1:5001" # Assumes a local iperf instance
-VERSION=$(git describe --tags --always --dirty="-dev")
+VERSION=$(git rev-parse --abbrev-ref HEAD)-$(git describe --tags --always --dirty="-dev")
 set -o pipefail
+
+if nc -zv 127.0.0.1 5001; then
+  echo "### Local iperf server is ready"
+else
+  echo "### Local iperf server not running. Aborting"
+  exit 1
+fi
 
 ### Clean up old files
 if [[ -f "${PIDFILE}" ]]; then # Old file exists, kill and remove
@@ -56,7 +63,7 @@ echo -e '```' >> PERFORMANCE-${VERSION}.MD
 echo -e "\n## IPERF Native performance, 10 connection" >> PERFORMANCE-${VERSION}.MD
 echo -e '```' >> PERFORMANCE-${VERSION}.MD
 echo "# iperf -c 127.0.0.1 --port 5001 --parallel 10" >> PERFORMANCE-${VERSION}.MD
-iperf -c 127.0.0.1 --port 5001 --parallel 1  &>> PERFORMANCE-${VERSION}.MD
+iperf -c 127.0.0.1 --port 5001 --parallel 10  &>> PERFORMANCE-${VERSION}.MD
 echo -e '```' >> PERFORMANCE-${VERSION}.MD
 
 echo -e "\n## IPERF Jumpgate performance, single connection" >> PERFORMANCE-${VERSION}.MD

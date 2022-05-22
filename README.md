@@ -2,10 +2,8 @@
 
 ## A simple TCP Connection Forwarder
 
-As an exercise to learn more network development with
-[Golang](https://golang.org), I decided to rewrite [jumpgate](http://jumpgate.sourceforge.net) myself. This
-became a rabbit hole of a "simple" TCP connection forwarding to multiple new
-features that I use. (I'm a big prometheus fan)
+As an exercise to learn more network development with [Golang](https://golang.org), I decided to rewrite [jumpgate](http://jumpgate.sourceforge.net) myself. This
+became a rabbit hole of a "simple" TCP connection forwarding to multiple new features that I use. (I'm a big prometheus fan)
 
 ## Usage
 
@@ -24,9 +22,25 @@ Another option you can add to jumpgate is `--metrics-listen 0.0.0.0:9878` to exp
 
 A simple `make` should suffice to build the binary after checkout
 
+## Building in docker
+
+To setup the cross compile build environmentg
+```
+sudo apt-get docker-ce docker-ce-cli containerd.io install binfmt-support qemu-user-static
+docker buildx create --use --name cross-platform-build
+```
+
+To check the platforms we can build
+```
+docker buildx inspect --bootstrap cross-platform-build
+```
+
+To build and push at the same time
+```
+docker buildx build -f Dockerfile --platform linux/amd64,linux/arm64 -t visago/jumpgate .
+```
+
 ## History / Why ?
 
-For many years, i was using [jumpgate](http://jumpgate.sourceforge.net) to forward connections from either a router/firewall to a service.
-It provided a simple binary, and worked with Linux/BSD, and didn't need root
-(Unlike IPTABLES) I've since moved on to using [socat](https://www.cyberciti.biz/faq/linux-unix-tcp-port-forwarding/) which works great, but lacked decent logging (It required -d -d before you get the IP details)
-
+For many years, i was using [jumpgate](http://jumpgate.sourceforge.net) to forward connections from either a router/firewall to a service. 
+It provided a simple binary, and worked with Linux/BSD, and didn't need root (Unlike IPTABLES) I've since moved on to using [socat](https://www.cyberciti.biz/faq/linux-unix-tcp-port-forwarding/) which works great, but lacked decent logging (It required -d -d before you get the IP details)
