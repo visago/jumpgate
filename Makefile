@@ -7,14 +7,18 @@ VERSION_FLAGS    := -ldflags='-X "main.BuildVersion=$(VERSION)" -X "main.BuildRe
 all:	lint build
 
 build:
-	go build -o bin/jumpgate ${VERSION_FLAGS} main.go
+	go build -o bin/jumpgate ${VERSION_FLAGS} jumpgate.go
 
 lint:
-	gofmt -w main.go
+	gofmt -w jumpgate.go
 
 run:
-	go run ${VERSION_FLAGS} main.go
+	go run ${VERSION_FLAGS} jumpgate.go
 	
 clean:
 	rm -rf bin/jumpgate
-		
+
+
+docker:
+	docker buildx build -f Dockerfile --platform linux/amd64,linux/arm64 -t visago/jumpgate:${VERSION} --push .
+	docker buildx build -f Dockerfile --platform linux/amd64,linux/arm64 -t visago/jumpgate:latest --push .

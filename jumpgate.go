@@ -45,15 +45,15 @@ var connectionMapMutex sync.RWMutex
 
 var (
 	metricsConnectionTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "jumpgate_connections_total",
+		Name: applicationName + "_connections_total",
 		Help: "The total number of connections",
 	})
 	metricsProxyRx = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "jumpgate_proxy_rx_bytes",
+		Name: applicationName + "_proxy_rx_bytes",
 		Help: "Bytes received by the service",
 	})
 	metricsProxyTx = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "jumpgate_proxy_tx_bytes",
+		Name: applicationName + "_proxy_tx_bytes",
 		Help: "Bytes transmitted by the service",
 	})
 )
@@ -66,7 +66,7 @@ func main() {
 		savePIDFile(flagPIDFile)
 	}
 	if len(flagMetricsListen) > 0 { // Start metrics engine
-		httpServerStart()
+		metricHttpServerStart()
 	}
 	listenLoop()
 	log.Printf("quit")
@@ -95,7 +95,7 @@ func parseFlags() {
 	flag.StringVar(&flagMetricsListen, "metrics-listen", "", "metrics listener <host>:<port>") // Recommend 0.0.0.0:9878
 	flag.StringVar(&flagSource, "source", "", "source <host>:<port>")
 	flag.StringVar(&flagTarget, "target", "", "target <host>:<port>")
-	flag.StringVar(&flagPIDFile, "pidfile", "", "target <host>:<port>")
+	flag.StringVar(&flagPIDFile, "pidfile", "", "pidfile")
 	flag.BoolVar(&flagVerbose, "verbose", false, "verbose flag")
 	flag.BoolVar(&flagDebug, "debug", false, "debug flag")
 	flag.BoolVar(&flagVersion, "version", false, "get version")
@@ -112,12 +112,12 @@ func parseFlags() {
 }
 
 func savePIDFile(pidFile string) {
-
 	file, err := os.Create(pidFile)
 	if err != nil {
 		log.Fatalf("Unable to create pid file : %v", err)
 	}
 	defer file.Close()
+
 	pid := os.Getpid()
 	if _, err = file.WriteString(strconv.Itoa(pid)); err != nil {
 		log.Fatalf("Unable to create pid file : %v", err)
@@ -130,9 +130,9 @@ func savePIDFile(pidFile string) {
 
 }
 
-func httpServerStart() {
+func metricHttpServerStart() {
 	var buildInfoMetric = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "jumpgate_build_info", Help: "Shows the build info/version",
+		Name: applicationName + "_build_info", Help: "Shows the build info/version",
 		ConstLabels: prometheus.Labels{"branch": BuildBranch, "revision": BuildRevision, "version": BuildVersion, "buildTime": BuildTime, "goversion": runtime.Version()}})
 	prometheus.MustRegister(buildInfoMetric)
 	buildInfoMetric.Set(1)
@@ -185,7 +185,7 @@ func handleRequest(conn net.Conn, flagTarget string, connectionID uint) {
 		log.Printf("[%0d] Forwarding %s to %s", connectionID, conn.RemoteAddr(), proxy.RemoteAddr().String())
 	}
 
-	// server <- proxy <- jumpgate -> conn -> user
+	// server <- proxy <- applicationName -> conn -> user
 	go forwardIO(conn, proxy, connectionID, true)  // Packets from server to user (tx)
 	go forwardIO(proxy, conn, connectionID, false) // Packets from user to server (tx)
 }
