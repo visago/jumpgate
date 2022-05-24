@@ -2,8 +2,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -12,6 +14,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -43,6 +46,18 @@ type connectionStruct struct {
 var connectionMap map[uint]*connectionStruct
 var connectionMapMutex sync.RWMutex
 
+const (
+	MangleNone  uint = 0
+	MangleClose uint = 1
+	MangleDrop  uint = 2
+	MangleLag   uint = 3
+)
+
+var mangleMode uint
+var mangleLag uint64      // Seconds to lag before mangle
+var manglePercent int = 0 // Percentage chance of mangle (% chance a mangle will occur, default 0)
+var mangleMutex sync.RWMutex
+
 var (
 	metricsConnectionTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: applicationName + "_connections_total",
@@ -55,6 +70,18 @@ var (
 	metricsProxyTx = promauto.NewCounter(prometheus.CounterOpts{
 		Name: applicationName + "_proxy_tx_bytes",
 		Help: "Bytes transmitted by the service",
+	})
+	mangleModeGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: applicationName + "_mangle_mode",
+		Help: "Mangle mode",
+	})
+	mangleLagGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: applicationName + "_mangle_lag",
+		Help: "Mangle lag before mangle",
+	})
+	manglePercentGauge = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: applicationName + "_mangle_percent",
+		Help: "Mangle percentage of connections",
 	})
 )
 
@@ -136,17 +163,82 @@ func metricHttpServerStart() {
 		ConstLabels: prometheus.Labels{"branch": BuildBranch, "revision": BuildRevision, "version": BuildVersion, "buildTime": BuildTime, "goversion": runtime.Version()}})
 	prometheus.MustRegister(buildInfoMetric)
 	buildInfoMetric.Set(1)
-	http.Handle("/metrics", promhttp.Handler()) // Do we really want this ?
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("<html><body><a href=/metrics>metrics</a></body></html>"))
 	})
+	http.HandleFunc("/mangle", mangleServer)
+	http.Handle("/metrics", promhttp.Handler()) // Do we really want this ?
 	go func() {
 		if err := http.ListenAndServe(flagMetricsListen, nil); err != nil {
 			log.Fatalf("FATAL: Failed to start metrics http engine - %v", err)
 		}
 	}()
 	log.Printf("%s metrics engine listening on %s", applicationName, flagMetricsListen)
+}
+
+func mangleServer(w http.ResponseWriter, r *http.Request) {
+	requestMode := r.URL.Query().Get("mode")
+	requestLag := r.URL.Query().Get("lag")
+	requestRandom := r.URL.Query().Get("percent")
+	mangleMutex.Lock()
+	if len(requestMode) > 0 {
+		switch requestMode {
+		case "close":
+			mangleMode = MangleClose
+			manglePercent = 100
+			mangleLag = 0
+		case "drop":
+			mangleMode = MangleDrop
+			manglePercent = 100
+			mangleLag = 0
+		case "lag":
+			mangleMode = MangleLag
+			manglePercent = 100
+			mangleLag = 1
+		case "none":
+			mangleMode = MangleNone
+			manglePercent = 0
+			mangleLag = 0
+		default:
+			mangleMode = MangleNone
+			manglePercent = 0
+			mangleLag = 0
+			requestMode = "none"
+		}
+		mangleModeGauge.Set(float64(mangleMode))
+		log.Printf("Mangle mode is now %s(%0d)\n", requestMode, mangleMode)
+		fmt.Fprintf(w, "Mangle mode is now %s(%0d)\n", requestMode, mangleMode)
+	} else {
+		fmt.Fprintf(w, "Mangle mode not set. Set ?mode=<close|drop|lag|none>\n")
+	}
+	if len(requestLag) > 0 {
+		i, err := strconv.ParseUint(requestLag, 10, 64)
+		if err != nil {
+			// handle error
+			i = 1
+		}
+		mangleLag = i
+		log.Printf("Mangle lag is now %0d\n", mangleLag)
+	}
+	mangleLagGauge.Set(float64(mangleLag))
+
+	if len(requestRandom) > 0 {
+		i, err := strconv.Atoi(requestRandom)
+		if err != nil {
+			// handle error
+			i = 1
+		}
+		manglePercent = i
+		if manglePercent < 0 {
+			manglePercent = 0
+		} else if manglePercent > 100 {
+			manglePercent = 100
+		}
+		log.Printf("Mangle will occur on %0d%% of connections\n", manglePercent)
+	}
+	manglePercentGauge.Set(float64(manglePercent)) // We use / as its default handler
+	mangleMutex.Unlock()
 }
 
 func listenLoop() {
@@ -176,9 +268,45 @@ func handleRequest(conn net.Conn, flagTarget string, connectionID uint) {
 	if flagDebug { // This is optional since we will have the next section
 		log.Printf("[%0d] Connection from %s to %s", connectionID, conn.RemoteAddr().String(), conn.LocalAddr())
 	}
+	if rand.Intn(100) > (100 - manglePercent) {
+		if mangleMode == MangleDrop { // We don't close the connection for DROP
+			if flagVerbose {
+				log.Printf("[%0d] Mangle: DROP %s", connectionID, conn.RemoteAddr().String())
+			}
+			return
+		} else if mangleMode == MangleClose {
+			if mangleLag > 0 {
+				if flagVerbose {
+					log.Printf("[%0d] Mangle: LAG-CLOSE %s START %0ds", connectionID, conn.RemoteAddr().String(), mangleLag)
+				}
+				time.Sleep(time.Duration(mangleLag) * time.Second)
+				if flagVerbose {
+					log.Printf("[%0d] Mangle: LAG-CLOSE %s DONE %0ds", connectionID, conn.RemoteAddr().String(), mangleLag)
+				}
+			}
+			if flagVerbose {
+				log.Printf("[%0d] Mangle: CLOSE %s", connectionID, conn.RemoteAddr().String())
+			}
+			closeConnection(conn, connectionID)
+			return
+		} else if mangleMode == MangleLag {
+			if mangleLag > 0 {
+				if flagVerbose {
+					log.Printf("[%0d] Mangle: LAG %s START %0ds", connectionID, conn.RemoteAddr().String(), mangleLag)
+				}
+				time.Sleep(time.Duration(mangleLag) * time.Second)
+				if flagVerbose {
+					log.Printf("[%0d] Mangle: LAG %s DONE %0ds", connectionID, conn.RemoteAddr().String(), mangleLag)
+				}
+			} else {
+				log.Printf("[%0d] Mangle: LAG %s NOSLEEP %0ds", connectionID, conn.RemoteAddr().String(), mangleLag)
+			}
+		}
+	}
 	proxy, err := net.Dial("tcp", flagTarget)
 	if err != nil {
-		log.Printf("ERROR: Failed to connect to %s - %v", flagTarget, err)
+		log.Printf("[%0d] ERROR: Failed to connect to %s - %v", connectionID, flagTarget, err)
+		closeConnection(conn, connectionID)
 		return
 	}
 	if flagVerbose {
@@ -239,6 +367,30 @@ func closeConnections(src net.Conn, dst net.Conn, connectionID uint, tx bool) {
 	} else {
 		if flagDebug {
 			log.Printf("[%0d] Already closed %s to %s [TX %t]", connectionID, src.RemoteAddr(), dst.RemoteAddr(), tx)
+		}
+	}
+	connectionMapMutex.Unlock()
+}
+
+func closeConnection(src net.Conn, connectionID uint) { // This is usually used when the target connection is not created yet
+	src.Close()
+	connectionMapMutex.Lock()
+	if connectionMap[connectionID] != nil { // Exists, first delete
+		if connectionMap[connectionID].Status < 8 {
+			if flagDebug {
+				log.Printf("[%0d] Closing %s [TX %0d / RX %0d]", connectionID, src.RemoteAddr(), connectionMap[connectionID].TxBytes, connectionMap[connectionID].RxBytes)
+			}
+			connectionMap[connectionID].Status = 8
+		} else if connectionMap[connectionID].Status == 8 {
+			if flagVerbose {
+				log.Printf("[%0d] Closed %s [TX %0d / RX %0d]", connectionID, src.RemoteAddr(), connectionMap[connectionID].TxBytes, connectionMap[connectionID].RxBytes)
+			}
+			connectionMap[connectionID].Status = 9
+			delete(connectionMap, connectionID)
+		}
+	} else {
+		if flagDebug {
+			log.Printf("[%0d] Already closed %s", connectionID, src.RemoteAddr())
 		}
 	}
 	connectionMapMutex.Unlock()

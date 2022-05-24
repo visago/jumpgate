@@ -40,6 +40,19 @@ To build and push at the same time
 docker buildx build -f Dockerfile --platform linux/amd64,linux/arm64 -t visago/jumpgate .
 ```
 
+## Mangling support
+
+You can now use the metrics listen interface to call a /mangle endpoint on the same port as the /metrics endpoint
+
+Possible query paremeters are
+
+mode = drop (Like iptables drop, client will not know the connection is dropped)
+mode = close (Client will see a disconnect, X seconds after connecting)
+mode = lag (Adds a X seconds lag, use lag value)
+mode = none (Reset, back to normal operation)
+percent = 0 - 100 (Affects only a % of connections
+lag = 0 - 120 (Optional setting value used for lag seconds)
+
 ## History / Why ?
 
 For many years, i was using [jumpgate](http://jumpgate.sourceforge.net) to forward connections from either a router/firewall to a service. 
