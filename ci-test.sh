@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-TIMEOUT=60
+TIMEOUT=30
 PIDFILE="/tmp/jumpgate.pid"
 TESTLOGFILE="test.log"
 METRICSLISTEN="127.0.0.1:9878"
@@ -24,14 +24,17 @@ else
 fi
 
 ### We do a jumpgate to the metrics listener port so we don't need to spin up a test server
-nohup bin/jumpgate --source "${JUMPGATELISTEN}" --target "${METRICSLISTEN}" --metrics-listen "${METRICSLISTEN}" --pidfile ${PIDFILE} &> ${TESTLOGFILE} &
+#echo "strace -f bin/jumpgate --source ${JUMPGATELISTEN} --target ${METRICSLISTEN} --metrics-listen ${METRICSLISTEN} --pidfile ${PIDFILE}"
+#strace -f 
+bin/jumpgate --source ${JUMPGATELISTEN} --target ${METRICSLISTEN} --metrics-listen ${METRICSLISTEN} --pidfile ${PIDFILE} &> ${TESTLOGFILE} &
+
 while [ ! -f ${PIDFILE} ]; do
-  if [ "$timeout" == 0 ]; then
+  if [ "$TIMEOUT" == 0 ]; then
     echo "### ERROR PIDFILE - Timeout while waiting for the file ${PIDFILE} to exist"
     exit 1
   fi
   sleep 1
-  ((timeout--))
+  ((TIMEOUT--))
 done
 echo "### OKAY PIDFILE - ${PIDFILE} CREATED"
 
@@ -70,6 +73,116 @@ else
   exit 1
 fi
 
+### Ensures concurrent connection
+if ab -n 100 -c 10 http://${JUMPGATELISTEN}/metrics; then
+  echo "### OKAY AB - Multiple connection count is supported"
+else
+  echo "### ERROR AB - Failed to handle multiple connections"
+  exit 1
+fi
+
+### Test volume
+#curl -s "http://${METRICSLISTEN}/metrics/reset"
+if true; then
+  PERCENT=100
+  MODE=normal
+  MAX=100
+  PASS=0
+  TARGET=${MAX}
+  for i in $(seq ${MAX}); do
+    if curl -s --fail --max-time 3 -o /dev/null http://${JUMPGATELISTEN}/metrics 2>/dev/null; then
+      PASS=$(( PASS + 1 ))
+    fi
+  done
+  VARIANT=$(( ( TARGET - PASS ) * 100 / MAX ))
+  curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate_connections"
+  if [[ "${VARIANT#-}" -lt "10" ]]; then
+    echo "### OKAY ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+  else
+    echo "### ERROR ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+    exit 1
+  fi
+fi
+
+### Test mangling - lag
+if true; then
+  for PERCENT in 25 75; do
+    MODE=lag
+    MAX=100
+    LAG=5
+    PASS=0
+    TARGET=$(( MAX * ( 100 - PERCENT ) / 100 )) #TARGET
+    curl -s "http://${METRICSLISTEN}/mangle?mode=${MODE}&lag=${LAG}&percent=${PERCENT}"
+    curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate"
+    for i in $(seq ${MAX}); do
+      if curl -s --fail --max-time 2 -o /dev/null http://${JUMPGATELISTEN}/metrics 2>/dev/null; then
+        PASS=$(( PASS + 1 ))
+      fi
+    done
+    VARIANT=$(( ( TARGET - PASS ) * 100 / MAX ))
+    curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate"
+    if [[ "${VARIANT#-}" -lt "10" ]]; then
+      echo "### OKAY ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+    else
+      echo "### ERROR ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+      exit 1
+    fi
+  done
+fi
+
+### Test mangling - close
+for PERCENT in 10 25 50 75 90; do
+  #curl -s "http://${METRICSLISTEN}/metrics/reset"
+  MODE=close
+  MAX=100
+  PASS=0
+  TARGET=$(( MAX * ( 100 - PERCENT ) / 100 )) #TARGET
+  curl -s "http://${METRICSLISTEN}/mangle?mode=${MODE}&percent=${PERCENT}"
+  for i in $(seq ${MAX}); do
+    if curl -s --fail --max-time 3 -o /dev/null http://${JUMPGATELISTEN}/metrics 2>/dev/null; then
+      PASS=$(( PASS + 1 ))
+    fi
+  done
+  VARIANT=$(( ( TARGET - PASS ) * 100 / MAX ))
+  curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate_connections"
+  if [[ "${VARIANT#-}" -lt "15" ]]; then
+    echo "### OKAY ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+  else
+    echo "### ERROR ${PERCENT}${MODE} - Variant of ${VARIANT#-}% with ${PASS} out of ${MAX} times, with target of ${TARGET} (${PERCENT}%)"
+    curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate"
+    exit 1
+  fi
+done
+
+#curl -s "http://${METRICSLISTEN}/metrics" | grep "^jumpgate"
+
+### Check if there's any connections left
+sleep 1
+OUTPUT=$(curl -s "http://${METRICSLISTEN}/mangle/dump")
+if [[ -n "${OUTPUT}" ]]; then
+  echo "### ERROR REMAINING - Found output of ${OUTPUT} in dump. Means we got connections unclosed"
+  exit 1
+else
+  echo "### OK REMAINING - No connections remaining. Good !"
+fi
+
+### Reset connection
+TOUCH=nc.touch
+$(rm -f ${TOUCH}; nc 127.0.0.1 9000; touch ${TOUCH}) &
+sleep 1
+if [[ -f nc.touch ]]; then
+  echo "### ERROR RESETCHECK - touch file ${TOUCH} exists. Maybe jumpgate is down"
+fi
+curl -s "http://${METRICSLISTEN}/mangle/reset"
+sleep 1
+if [[ -f nc.touch ]]; then
+  echo "### OK RESETCHECK - touch file ${TOUCH} now exists. Means connection terminated"
+else 
+  echo "### ERROR RESETCHECK - touch file ${TOUCH} does not exist. Jumpgate failed to reset"
+fi
+rm -f ${TOUCH}
+
+
 ### Send SIGTERM to quit process
 if kill -TERM ${PID}; then
   echo "### OKAY SIGTERM - PID ${PID} sent SIGTERM"
@@ -80,12 +193,12 @@ fi
 
 ### Wait for process to quit
 while kill -0 ${PID} &>/dev/null ; do
-  if [ "$timeout" == 0 ]; then
+  if [[ "$TIMEOUT" -le "0" ]]; then
     echo "### ERROR PIDTERM - Timeout while waiting for the process PID ${PID} to quit"
     exit 1
   fi
   sleep 1
-  ((timeout--))
+  ((TIMEOUT--))
 done
 echo "### OKAY PIDTERM - PID ${PID} quit"
 
