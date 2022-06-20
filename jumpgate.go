@@ -462,10 +462,10 @@ func forwardIO(connectionID uint, tx bool) { // rx flag is just for traffic dire
 
 func closeConn(connectionID uint) { // Close a connection
 	connectionMapMutex.Lock()
-	if flagVerbose {
-		log.Printf("[%0d] Closing connection from %s", connectionID, connectionMap[connectionID].SrcConn.RemoteAddr())
-	}
 	if connectionMap[connectionID] != nil { // Exists, first delete
+		if flagVerbose {
+			log.Printf("[%0d] Closing connection from %s", connectionID, connectionMap[connectionID].SrcConn.RemoteAddr())
+		}
 		singleConn := true
 		if connectionMap[connectionID].DstConn != nil {
 			connectionMap[connectionID].DstConn.Close()
@@ -489,7 +489,7 @@ func closeConn(connectionID uint) { // Close a connection
 		}
 	} else {
 		if flagDebug {
-			log.Printf("[%0d] Already closed %s", connectionID, connectionMap[connectionID].SrcConn.RemoteAddr())
+			log.Printf("[%0d] Already closed before", connectionID)
 		}
 	}
 	connectionMapMutex.Unlock()
